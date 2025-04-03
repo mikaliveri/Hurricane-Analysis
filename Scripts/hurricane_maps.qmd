@@ -1,0 +1,706 @@
+---
+title: "Hurricane Maps"
+format: html
+---
+
+-----------------------------------------------------------------------------
+ File Name: hurricane_maps.qmd
+ Inputs: 
+  - CSV file: ibtracs.NA.list.v04r01.csv (hurricane track data)
+  - Libraries: tidyverse, lubridate, sf, rnaturalearth, dplyr, ggplot2, 
+               plotly, leaflet
+
+Description:
+ This script extends the analysis of tropical cyclones in the North Atlantic 
+  by incorporating interactive and faceted visualizations. It focuses on storm 
+  tracks, landfall events, category progression, and time-based hurricane trends.
+
+Details:
+  - Loads and cleans ibtracs hurricane data
+  - Extracts date, time, and full datetime components from ISO_TIME
+  - Groups storms by year and category
+  - Maps hurricane tracks using:
+      - ggplot2 for static mapping
+      - leaflet for interactive mapping
+      - plotly for interactivity in storm tracking
+  - Identifies and highlights landfall events using LANDFALL and DIST2LAND
+  - Implements faceted plots by:
+      - Month, to track seasonal storm behavior
+     - Category, to compare different intensities
+
+Note: This script builds towards a Shiny app for dynamic hurricane tracking 
+      and analysis.
+-----------------------------------------------------------------------------
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(rnaturalearth)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(leaflet)
+```
+
+```{r}
+# import CSV file with read.csv()
+
+# read-in only first 16 columns
+ibtracs <- "../ibtracs.NA.csv"
+
+
+# names of first 16 columns
+col_names <- c(
+  "SID",
+  "SEASON",
+  "NUMBER",
+  "BASIN",
+  "SUBBASIN",
+  "NAME",
+  "ISO_TIME",
+  "NATURE",
+  "LAT",
+  "LON",
+  "WMO_WIND",
+  "WMO_PRES",
+  "WMO_AGENCY",
+  "TRACK_TYPE",
+  "DIST2LAND",
+  "LANDFALL"
+)
+
+# data-type of first 16 columns
+col_types <- c(
+  "character",
+  "integer",
+  "integer",
+  "character",
+  "character",
+  "character",
+  "character",
+  "character",
+  "double",
+  "double",
+  "integer",
+  "integer",
+  "character",
+  "character",
+  "integer",
+  "integer"  
+)
+
+
+dat <- read.csv(
+  file = ibtracs,
+  colClasses = c(col_types, rep("NULL", 158)),
+  stringsAsFactors = FALSE, 
+  #skip = 77876, # starting SEASON 1970
+  na.strings = " ")
+
+colnames(dat) <- col_names
+
+# Extract date and time components
+dat$DATE <- as.Date(dat$ISO_TIME)  # Date only
+dat$DATETIME <- as.POSIXct(dat$ISO_TIME, format = "%Y-%m-%d %H:%M:%S")  # Full date-time
+dat$TIME <- format(as.POSIXct(dat$ISO_TIME, format = "%Y-%m-%d %H:%M:%S"), "%H:%M:%S")  # Time only
+
+```
+
+```{r}
+dat_1 <- dat |>
+  count(SID) |>
+  mutate(SEASON = as.numeric(str_sub(SID,1,4))) |>
+  count(SEASON)
+
+dat_1
+```
+
+```{r}
+dat_2 <- dat |>
+  group_by(SID) |>
+  summarize(max_wind = max(WMO_WIND, na.rm = TRUE)) |>
+  mutate(
+    SEASON = as.numeric(str_sub(SID, 1, 4)),
+    Category = case_when(
+      max_wind < 64 ~ "Tropical Storm",
+      max_wind >= 64 & max_wind <= 82 ~ "Category 1",
+      max_wind >= 83 & max_wind <= 95 ~ "Category 2",
+      max_wind >= 96 & max_wind <= 112 ~ "Category 3",
+      max_wind >= 113 & max_wind <= 136 ~ "Category 4",
+      max_wind >= 137 ~ "Category 5",
+      TRUE ~ NA_character_  # Handle missing values
+    )
+  ) |> 
+  filter(!is.na(Category))  # Remove missing values
+
+dat_2
+```
+
+```{r}
+# Define North Atlantic region limits
+min_lon <- -130  # Western boundary
+max_lon <- -0   # Eastern boundary
+min_lat <- 0     # Southern boundary
+max_lat <- 70    # Northern boundary
+```
+
+```{r}
+h5_tracks <- dat_2 |>
+  filter(max_wind >= 137) |>
+  inner_join(dat, by = "SID")
+```
+
+
+```{r}
+storms_H5 <- dat_2 |>
+  filter(max_wind >= 137) |>  # Filter for Category 5 hurricanes
+  inner_join(dat, by = "SID") |>  # Join with track data
+  select(NAME, LON, LAT, SID) |>  # Select relevant columns
+  rename(long = LON, lat = LAT, name = NAME)  # Rename for compatibility
+
+# Find the first recorded position of each hurricane
+storms_H5_start <- storms_H5 |>
+  group_by(SID) |>
+  slice_min(order_by = lat) |>  # Take the first lat entry (could also use min DATE)
+  ungroup()
+
+# Load North America map
+north_america <- ne_countries(scale = "medium", continent = "North America", returnclass = "sf")
+
+# Find the first recorded position of each hurricane
+storms_H5_start <- storms_H5 |>
+  group_by(SID) |>
+  slice_min(order_by = lat) |>  # Take the first lat entry (could also use min DATE)
+  ungroup()
+
+# Create a ggplot map without a legend but with tooltips for interactivity
+gg <- ggplot(data = north_america) +
+  geom_sf() +
+  geom_path(data = storms_H5,
+            aes(x = long, y = lat, group = name, color = name, text = name),  # Keep colors & add name for tooltip
+            linewidth = 0.7, show.legend = FALSE) +  # Remove legend
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +  
+  labs(
+    title = "Tracks of Category 5 Hurricanes (North Atlantic)",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.background = element_blank(),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    legend.position = "none"  # Ensure the legend is removed
+  )
+
+# Convert to interactive plotly map with hover text
+interactive_map <- ggplotly(gg, tooltip = "text")  # Enable tooltips for hurricane names
+
+# Show the interactive map
+interactive_map
+
+
+```
+
+```{r,out.width="100%"}
+
+# Load world map
+world_map <- ne_countries(returnclass = "sf")
+
+# Join categorized storms (dat_2) with the full track data (dat)
+all_tracks <- dat_2 |>
+  inner_join(dat, by = "SID")
+
+# Create the ggplot faceted by Category
+p_all_tracks <- ggplot() +
+  geom_sf(data = world_map, fill = "black", color = "gray") +  
+  geom_path(data = all_tracks, 
+            aes(x = LON, y = LAT, group = SID, color = Category), 
+            linewidth = 0.4, alpha = 0.7) +  
+  scale_color_manual(
+    values = c(
+      "Tropical Storm" = "grey",
+      "Category 1" = "pink",
+      "Category 2" = "lightcoral",
+      "Category 3" = "red",
+      "Category 4" = "darkred",
+      "Category 5" = "maroon"
+    ),
+    name = "Hurricane Category"
+  ) +
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +  
+  labs(
+    title = "Tropical Cyclone Tracks in the North Atlantic by Category",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  facet_wrap(~ Category, ncol = 3) +  
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "black", color = NA),  
+    panel.grid = element_blank(),
+    plot.title = element_text(color = "white", hjust = 0.5, size = 16, face = "bold"),
+    axis.text = element_text(color = "white"),
+    axis.title = element_text(color = "white"),
+    strip.background = element_rect(fill = "gray20"),  # Background for facet labels
+    strip.text = element_text(color = "white", face = "bold"),  # Facet label text
+    legend.position = "none"
+  )
+
+p_all_tracks
+
+
+```
+
+# Plot of hurricanes that made landfall in 2005
+```{r}
+#| code-fold: true
+#| code-summary: "Show Code"
+#| message: false
+#| warning: false
+#| error: false
+
+# Filter for storms in 2005
+dat_2005 <- dat |> filter(SEASON == 2005)
+
+# Identify storms that made landfall
+dat_2005_land <- dat |> 
+  filter(SEASON == 2005, LANDFALL == 0) |> 
+  select(SID)
+
+# Keep only storms that made landfall
+dat_2005 <- inner_join(dat_2005, dat_2005_land, by = "SID")
+
+# Count unique hurricanes
+n <- dat_2005 |> count(NAME) |> summarize(n = n()) |> pull(n)
+
+# Generate a color palette using viridis
+pal = colorFactor(
+  palette = rainbow(n = n),
+  domain = dat_2005$NAME
+)
+
+# Create interactive Leaflet map
+leaflet(dat_2005) |>
+  setView(lng = -50, lat = 30, zoom = 3) |>
+  addTiles() |>
+  addCircleMarkers(
+    lng = ~LON,
+    lat = ~LAT,
+    radius = ~WMO_WIND / 20,  # Scaled marker size by wind speed
+    color = ~pal(NAME),
+    stroke = TRUE,
+    weight = 1,
+    fillOpacity = 0.7,
+    popup = ~paste("<b>Hurricane:</b> ", NAME, "<br>",
+                   "<b>Wind Speed:</b> ", WMO_WIND, " knots")  # Clickable popup
+  ) |>
+  addControl(
+    "<strong>Hurricanes Making Landfall (2005)</strong>", 
+    position = "topright", 
+    className = "map-title"
+  )
+
+```
+
+# Visualizing starting points
+
+```{r, out.width="100%"}
+
+# Load world map
+world_map <- ne_countries(returnclass = "sf")
+
+# Join full storm track data with categories
+all_tracks <- dat_2 |>
+  inner_join(dat, by = "SID") |>
+  mutate(
+    ISO_TIME = as.Date(ISO_TIME),
+    YEAR = year(ISO_TIME),   
+    MONTH = month(ISO_TIME, label = TRUE),  
+    NUM_MONTH = month(ISO_TIME),  
+    Category = factor(Category)  
+  ) |>
+  filter(!is.na(MONTH) & !is.na(Category))  
+
+# Identify the first recorded date and corresponding month for each hurricane
+hurricane_start_info <- all_tracks |>
+  arrange(SID, ISO_TIME) |>  
+  group_by(SID) |>  
+  summarize(
+    start_date = first(ISO_TIME),  
+    start_month = first(NUM_MONTH),  
+    start_month_label = first(MONTH), 
+    start_LON = first(LON),  
+    start_LAT = first(LAT)   
+  ) |> 
+  ungroup()
+```
+
+## Category 1
+```{r}
+
+h1_tracks <- all_tracks |>
+  filter(Category == "Category 1") |>
+  inner_join(hurricane_start_info, by = "SID") |>  
+  mutate(start_month_label = factor(start_month_label, levels = month.abb))  
+
+# Identify the first recorded position per hurricane
+h1_start_points <- h1_tracks |> 
+  group_by(SID) |> 
+  summarize(LON = first(LON), LAT = first(LAT), start_month_label = first(start_month_label)) |>  
+  ungroup()
+
+# Create the ggplot map with facetting
+p_h1_map <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgray", color = "black") +  
+  geom_path(data = h1_tracks, 
+            aes(x = LON, y = LAT, group = SID), 
+            linewidth = 0.5, color = "black", alpha = 0.7) +  
+  geom_point(data = h1_start_points, 
+             aes(x = LON, y = LAT), 
+             color = "yellow", size = 2) +  
+  coord_sf(xlim = c(-100, -20), ylim = c(0, 50)) +  
+  labs(
+    title = "Category 1 Hurricanes (Plotted by Starting Month)",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  facet_wrap(~ start_month_label, ncol = 4) +  
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "#ADD8E6", color = NA),  
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+p_h1_map
+```
+
+## Category 2
+```{r}
+
+h2_tracks <- all_tracks |>
+  filter(Category == "Category 2") |>
+  inner_join(hurricane_start_info, by = "SID") |>  
+  mutate(start_month_label = factor(start_month_label, levels = month.abb))  
+
+# Identify the first recorded position per hurricane
+h2_start_points <- h2_tracks |> 
+  group_by(SID) |> 
+  summarize(LON = first(LON), LAT = first(LAT), start_month_label = first(start_month_label)) |>  
+  ungroup()
+
+# Create the ggplot map with facetting
+p_h2_map <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgray", color = "black") +  
+  geom_path(data = h2_tracks, 
+            aes(x = LON, y = LAT, group = SID), 
+            linewidth = 0.5, color = "black", alpha = 0.7) +  
+  geom_point(data = h2_start_points, 
+             aes(x = LON, y = LAT), 
+             color = "yellow", size = 2) +  
+  coord_sf(xlim = c(-100, -20), ylim = c(0, 50)) +  
+  labs(
+    title = "Category 2 Hurricanes (Plotted by Starting Month)",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  facet_wrap(~ start_month_label, ncol = 3) +  
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "#ADD8E6", color = NA),  
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+p_h2_map
+```
+
+
+## Category 3
+```{r}
+
+h3_tracks <- all_tracks |>
+  filter(Category == "Category 3") |>
+  inner_join(hurricane_start_info, by = "SID") |>  
+  mutate(start_month_label = factor(start_month_label, levels = month.abb))  
+
+# Identify the first recorded position per hurricane
+h3_start_points <- h3_tracks |> 
+  group_by(SID) |> 
+  summarize(LON = first(LON), LAT = first(LAT), start_month_label = first(start_month_label)) |>  
+  ungroup()
+
+# Create the ggplot map with facetting
+p_h3_map <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgray", color = "black") +  
+  geom_path(data = h1_tracks, 
+            aes(x = LON, y = LAT, group = SID), 
+            linewidth = 0.5, color = "black", alpha = 0.7) +  
+  geom_point(data = h3_start_points, 
+             aes(x = LON, y = LAT), 
+             color = "yellow", size = 2) +  
+  coord_sf(xlim = c(-100, -20), ylim = c(0, 50)) +  
+  labs(
+    title = "Category 3 Hurricanes (Plotted by Starting Month)",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  facet_wrap(~ start_month_label, ncol = 4) +  
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "#ADD8E6", color = NA),  
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+p_h3_map
+```
+## Category 4
+```{r, out.width="100%"}
+
+# Keep only hurricanes that are Category 4 and limit data to their full track, but only in their starting month
+h4_tracks <- all_tracks |>
+  filter(Category == "Category 4") |>
+  inner_join(hurricane_start_info, by = "SID") |>  
+  mutate(start_month_label = factor(start_month_label, levels = month.abb))  
+
+# Identify the first recorded position per hurricane
+h4_start_points <- h4_tracks |> 
+  group_by(SID) |> 
+  summarize(LON = first(LON), LAT = first(LAT), start_month_label = first(start_month_label)) |>  
+  ungroup()
+
+# Create the ggplot map with facetting
+p_h4_map <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgray", color = "black") +  
+  geom_path(data = h4_tracks, 
+            aes(x = LON, y = LAT, group = SID), 
+            linewidth = 0.5, color = "black", alpha = 0.7) +  
+  geom_point(data = h4_start_points, 
+             aes(x = LON, y = LAT), 
+             color = "yellow", size = 2) +  
+  coord_sf(xlim = c(-100, -20), ylim = c(0, 50)) +  
+  labs(
+    title = "Category 4 Hurricanes (Plotted by Starting Month)",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  facet_wrap(~ start_month_label, ncol = 3) +  
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "#ADD8E6", color = NA),  
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+p_h4_map
+
+```
+
+## Category 5
+```{r}
+# Keep only hurricanes that are Category 5 and limit data to their full track, but only in their starting month
+h5_tracks <- all_tracks |>
+  filter(Category == "Category 5") |>
+  inner_join(hurricane_start_info, by = "SID") |>  
+  mutate(start_month_label = factor(start_month_label, levels = month.abb))  
+
+# Identify the first recorded position per hurricane
+h5_start_points <- h5_tracks |> 
+  group_by(SID) |> 
+  summarize(LON = first(LON), LAT = first(LAT), start_month_label = first(start_month_label)) |>  
+  ungroup()
+
+# Create the ggplot map with facetting
+p_h5_map <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgray", color = "black") +  
+  geom_path(data = h5_tracks, 
+            aes(x = LON, y = LAT, group = SID), 
+            linewidth = 0.5, color = "black", alpha = 0.7) +  
+  geom_point(data = h5_start_points, 
+             aes(x = LON, y = LAT), 
+             color = "yellow", size = 2) +  
+  coord_sf(xlim = c(-100, -20), ylim = c(0, 50)) +  
+  labs(
+    title = "Category 5 Hurricanes (Plotted by Starting Month)",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  facet_wrap(~ start_month_label, ncol = 2) +  
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "#ADD8E6", color = NA),  
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+p_h5_map
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = world_map, fill = "lightgray", color = "black") +  # Base map
+  geom_path(data = h5_tracks, 
+            aes(x = LON, y = LAT, group = SID), 
+            linewidth = 0.7, color = "red") +  # Hurricane tracks
+  labs(title = "Tracks of Category 5 Hurricanes (North Atlantic)",
+       x = "Longitude", y = "Latitude") +
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +  # Zoom into NA
+  theme_minimal()
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = world_map, fill = "lightgray", color = "black") +  # Base map
+  geom_path(data = h5_tracks, 
+            aes(x = LON, y = LAT, group = SID, color = NAME),  # Use NAME for color
+            linewidth = 0.7) +  # Hurricane tracks
+  scale_color_manual(
+    values = rainbow(length(unique(h5_tracks$NAME))),  # Assign unique colors
+    name = "Hurricane Name"
+  ) +
+  labs(
+    title = "Tracks of Category 5 Hurricanes (North Atlantic)",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +  # Focus on NA
+  theme_minimal() +
+  theme(
+    legend.position = "right",  # Place legend on the right
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text = element_text(size = 9)
+  )
+```
+
+
+## Starting points of Hurricane 5's that made landfall
+```{r}
+# Filter hurricanes that have LANDFALL = 0 at some point
+h5_tracks_landfall <- h5_tracks |> 
+  group_by(SID) |> 
+  filter(any(LANDFALL == 0)) |>  # Keep only hurricanes with landfall
+  ungroup()
+
+# Identify the first recorded position for these hurricanes
+h5_start_points <- h5_tracks_landfall |> 
+  group_by(SID) |> 
+  summarize(LON = first(LON), LAT = first(LAT))|>  # Get first recorded point for each hurricane
+  ungroup()
+
+# Create the ggplot map
+ggplot() +
+  geom_sf(data = world_map, fill = "lightgray", color = "black") +  # Base map
+  geom_path(data = h5_tracks_landfall, 
+            aes(x = LON, y = LAT, group = SID), 
+            linewidth = 0.5, color = "black", alpha = 0.7) +  # Hurricane tracks
+  geom_point(data = h5_start_points, 
+             aes(x = LON, y = LAT), 
+             color = "yellow", size = 2) +  # Points of origin
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +  # Focus on NA
+  labs(
+    title = "Tracks and Points of Origin for Category 5 Hurricanes (Landfall)",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "#ADD8E6", color = NA),  # Light blue background
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+
+```
+
+Faceted by starting month
+```{r}
+
+# Keep only Category 5 hurricanes that made landfall at some point
+h5_tracks_landfall <- h5_tracks |> 
+  group_by(SID) |> 
+  filter(any(LANDFALL == 0)) |>  # Keep only hurricanes that made landfall
+  ungroup()
+
+# Identify the first recorded position for these hurricanes
+h5_start_points <- h5_tracks_landfall |> 
+  group_by(SID) |> 
+  summarize(LON = first(LON), LAT = first(LAT), start_month_label = first(start_month_label)) |>  
+  ungroup()
+
+# Create the ggplot faceted by starting month
+p_h5_landfall <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgray", color = "black") +  
+  geom_path(data = h5_tracks_landfall, 
+            aes(x = LON, y = LAT, group = SID), 
+            linewidth = 0.5, color = "black", alpha = 0.7) +  # Full hurricane tracks
+  geom_point(data = h5_start_points, 
+             aes(x = LON, y = LAT), 
+             color = "yellow", size = 2) +  # Yellow for starting points
+  coord_sf(xlim = c(-100, 0), ylim = c(0, 63)) +  
+  labs(
+    title = "Category 5 Hurricanes That Made Landfall (Faceted by Starting Month)",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  facet_wrap(~ start_month_label, ncol = 3) +  # Facet by starting month
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 12, face = "bold"),
+    axis.text = element_text(size = 10),
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "#ADD8E6", color = NA),  
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+p_h5_landfall
+```
+
+```{r}
+# Plot tracks by category
+ggplot() +
+  geom_sf(data = world_map, fill = "black", color = "gray") +  
+  geom_path(data = all_tracks, 
+            aes(x = LON, y = LAT, group = SID, color = Category), 
+            linewidth = 0.4, alpha = 0.7) +  
+  scale_color_manual(
+    values = c(
+      "Tropical Storm" = "yellow",
+      "Category 1" = "lightgreen",
+      "Category 2" = "green",
+      "Category 3" = "blue",
+      "Category 4" = "purple",
+      "Category 5" = "red"
+    ),
+    name = "Hurricane Category"
+  ) +
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +  
+  labs(
+    title = "Tropical Cyclone Tracks in the North Atlantic by Category",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  theme_minimal() +
+  theme(
+    panel.background = element_rect(fill = "black", color = NA),  
+    panel.grid = element_blank(),
+    plot.title = element_text(color = "white", hjust = 0.5, size = 16, face = "bold"),
+    axis.text = element_text(color = "white"),
+    axis.title = element_text(color = "white"),
+    legend.background = element_rect(fill = "black", color = NA),
+    legend.text = element_text(color = "white"),
+    legend.title = element_text(color = "white")
+  )
+```
+

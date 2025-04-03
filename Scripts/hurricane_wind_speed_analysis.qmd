@@ -1,0 +1,217 @@
+---
+title: "Hurricane Wind Speed Analysis"
+format: html
+---
+-----------------------------------------------------------------------------
+ File Name: hurricane_wind_speed_analysis.qmd
+ Inputs: 
+  - CSV file: ibtracs.NA.csv (compressed hurricane track data)
+  - Libraries: tidyverse, lubridate, sf, rnaturalearth, dplyr, ggplot2, 
+               plotly, leaflet
+
+Description:
+ This script analyses wind speeds of tropical cyclones in the North Atlantic . 
+
+Details:
+  - Visualizes wind speed progression over time with:
+      - Area plots mimicking BBC-style hurricane reports
+      - Peak wind annotations for major hurricanes
+  - Plans for additional enhancements like category thresholds via horizontal 
+    lines or color ramps in sequential palettes.
+-----------------------------------------------------------------------------
+
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(rnaturalearth)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+#| message: false
+# import CSV file with read.csv()
+
+# read-in only first 16 columns
+ibtracs <- "../ibtracs.NA.csv"
+
+
+# names of first 16 columns
+col_names <- c(
+  "SID",
+  "SEASON",
+  "NUMBER",
+  "BASIN",
+  "SUBBASIN",
+  "NAME",
+  "ISO_TIME",
+  "NATURE",
+  "LAT",
+  "LON",
+  "WMO_WIND",
+  "WMO_PRES",
+  "WMO_AGENCY",
+  "TRACK_TYPE",
+  "DIST2LAND",
+  "LANDFALL"
+)
+
+# data-type of first 16 columns
+col_types <- c(
+  "character",
+  "integer",
+  "integer",
+  "character",
+  "character",
+  "character",
+  "character",
+  "character",
+  "double",
+  "double",
+  "integer",
+  "integer",
+  "character",
+  "character",
+  "integer",
+  "integer"  
+)
+
+
+dat <- read.csv(
+  file = ibtracs,  # <-- Ensures the file variable is correctly passed
+  colClasses = c(col_types, rep("NULL", 158)),
+  stringsAsFactors = FALSE, 
+  #skip = 77876, # starting SEASON 1970
+  na.strings = " "
+)
+
+colnames(dat) <- col_names
+```
+
+```{r}
+#| message: false
+#| warning: false
+
+# Classify each cyclone based on max wind speed
+dat_2 <- dat |>
+  group_by(SID) |>
+  summarize(max_wind = max(WMO_WIND, na.rm = TRUE)) |>
+  mutate(
+    SEASON = as.numeric(str_sub(SID, 1, 4)),
+    Category = case_when(
+      max_wind < 64 ~ "Tropical Storm",
+      max_wind >= 64 & max_wind <= 82 ~ "Category 1",
+      max_wind >= 83 & max_wind <= 95 ~ "Category 2",
+      max_wind >= 96 & max_wind <= 112 ~ "Category 3",
+      max_wind >= 113 & max_wind <= 136 ~ "Category 4",
+      max_wind >= 137 ~ "Category 5",
+      TRUE ~ NA_character_  # Handle missing values
+    )
+  ) |> 
+  filter(!is.na(Category))  # Remove missing values
+```
+
+Analysing wind speeds of Category 5 hurricanes over the years
+```{r}
+#| message: false
+
+# Extract only Category 5 cyclones and calculate max wind per year
+h5_wind_trends <- dat_2 %>%
+  filter(Category == "Category 5") %>%
+  group_by(SEASON) %>%
+  summarise(max_wind = max(max_wind, na.rm = TRUE), .groups = "drop")
+
+# Fit a linear regression model
+model <- lm(max_wind ~ SEASON, data = h5_wind_trends)
+#summary(model)  # Display regression results
+
+# Plot trend of maximum wind speed for Category 5 cyclones
+ggplot(h5_wind_trends, aes(x = SEASON, y = max_wind)) +
+  geom_line(color = "maroon") +  # Line plot
+  geom_point(color = "maroon", size = 3) +  # Points
+  geom_smooth(method = "lm", color = "red", se = FALSE) +  # Regression trend line
+  labs(title = "Category 5 Cyclones: Trend in Maximum Wind Speed", 
+       x = "Year", y = "Max Wind Speed (knots)") +
+  theme_minimal()
+
+```
+Chart of windspeeds of hurricane Katrina 2005
+```{r}
+#| warning: false
+# Filter for a specific hurricane
+hurricane_data <- dat |>
+  filter(SID == "2005236N23285") |>  # Replace with relevant SID
+  mutate(DATETIME = as.POSIXct(ISO_TIME, format = "%Y-%m-%d %H:%M:%S"))  # Convert to POSIX datetime
+
+# Find the peak wind speed for annotation
+peak_points <- hurricane_data |>
+  slice_max(order_by = WMO_WIND, n = 1)
+
+# BBC-style plot without categorization
+ggplot(hurricane_data, aes(x = DATETIME, y = WMO_WIND)) +
+  geom_area(fill = "red", alpha = 0.7) +  # Area plot for wind speed
+  geom_text(data = peak_points, aes(x = DATETIME, y = WMO_WIND, label = NAME), 
+            vjust = -1, size = 3, fontface = "bold", inherit.aes = FALSE) +  # Annotate peak
+  labs(
+    title = "Windspeed Trends for Hurricane Katrina",
+    subtitle = "Maximum sustained wind speed (knots) by hour",
+    x = "Datetime",
+    y = "Wind Speed (knots)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.title = element_text(size = 12),
+    legend.position = "none",  # Remove legend
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+Adding horizontal lines for the categories
+```{r}
+# Define hurricane wind speed categories
+category_thresholds <- c(34, 64, 83, 96, 113, 137)  # Knots
+category_labels <- c("Tropical Storm", "Category 1", "Category 2", "Category 3", "Category 4", "Category 5")
+
+# Filter for a specific hurricane
+hurricane_data <- dat |>
+  filter(SID == "2005236N23285") |>  # Replace with relevant SID
+  mutate(DATETIME = as.POSIXct(ISO_TIME, format = "%Y-%m-%d %H:%M:%S"))  # Convert to POSIX datetime
+
+# Find the peak wind speed for annotation
+peak_points <- hurricane_data |> slice_max(order_by = WMO_WIND, n = 1)
+
+# Create dataframe for horizontal category lines
+category_lines <- tibble(WMO_WIND = category_thresholds, Category = category_labels)
+
+# BBC-style plot with category change markers
+ggplot(hurricane_data, aes(x = DATETIME, y = WMO_WIND)) +
+  geom_area(fill = "red", alpha = 0.7) +  # Keep original area plot
+  geom_hline(data = category_lines, aes(yintercept = WMO_WIND), 
+             linetype = "dashed", color = "black", alpha = 0.7) +  # Dashed lines for category changes
+  geom_text(data = category_lines, aes(x = min(hurricane_data$DATETIME), y = WMO_WIND, 
+                                       label = Category), 
+            hjust = -0.1, vjust = -0.2, size = 3, fontface = "bold", color = "black") +  # Category labels
+  geom_text(data = peak_points, aes(x = DATETIME, y = WMO_WIND, label = NAME), 
+            vjust = -1, size = 5, fontface = "bold", color = "black", inherit.aes = FALSE) +  # Annotate peak
+  labs(
+    title = "Windspeed Trends for Hurricane Katrina",
+    subtitle = "Maximum sustained wind speed (knots) by hour",
+    x = "Datetime",
+    y = "Wind Speed (knots)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.title = element_text(size = 12),
+    legend.position = "none",  # Remove legend for a cleaner look
+    panel.grid.minor = element_blank()
+  )
+
+```
+

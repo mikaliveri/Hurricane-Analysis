@@ -1,0 +1,328 @@
+---
+title: "Hurricane Frequency Analysis"
+format: html
+---
+
+-----------------------------------------------------------------------------
+File Name: hurricane_frequency_analysis.qmd
+Inputs: 
+  - CSV file: ibtracs.NA.list.v04r01.csv (hurricane data)
+  - Libraries: tidyverse, lubridate, sf, rnaturalearth, dplyr, ggplot2
+
+Description:
+  This script analyzes tropical cyclone data in the North Atlantic region, 
+  focusing on storm frequency and intensity over time. It groups cyclones by 
+  year, 5-year, and 10-year intervals, categorizes them based on wind speed, 
+  and visualizes trends in cyclone activity.
+
+Details:
+  - Loads and cleans data from ibtracs
+  - Counts the number of storms per year and groups by 5-year and 10-year intervals
+  - Categorizes storms into Tropical Storm and Hurricane Categories 1-5
+  - Analyzes frequency trends of named storms using stacked bar plots
+  - Tracks trends in maximum wind speeds of Category 5 storms
+  - Performs linear regression on Category 5 wind speeds to assess trends
+  - Plots tropical cyclone frequency over time and trends in cyclone categories
+
+ Note: Future mapping visualizations should be in a separate script for clarity.
+-----------------------------------------------------------------------------
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(rnaturalearth)
+library(dplyr)
+library(ggplot2)
+```
+
+```{r}
+#| message: false
+# import CSV file with read.csv()
+
+# read-in only first 16 columns
+ibtracs <- "../ibtracs.NA.csv"
+
+
+# names of first 16 columns
+col_names <- c(
+  "SID",
+  "SEASON",
+  "NUMBER",
+  "BASIN",
+  "SUBBASIN",
+  "NAME",
+  "ISO_TIME",
+  "NATURE",
+  "LAT",
+  "LON",
+  "WMO_WIND",
+  "WMO_PRES",
+  "WMO_AGENCY",
+  "TRACK_TYPE",
+  "DIST2LAND",
+  "LANDFALL"
+)
+
+# data-type of first 16 columns
+col_types <- c(
+  "character",
+  "integer",
+  "integer",
+  "character",
+  "character",
+  "character",
+  "character",
+  "character",
+  "double",
+  "double",
+  "integer",
+  "integer",
+  "character",
+  "character",
+  "integer",
+  "integer"  
+)
+
+
+dat <- read.csv(
+  file = ibtracs,  # <-- Ensures the file variable is correctly passed
+  colClasses = c(col_types, rep("NULL", 158)),
+  stringsAsFactors = FALSE, 
+  #skip = 77876, # starting SEASON 1970
+  na.strings = " "
+)
+
+colnames(dat) <- col_names
+```
+
+```{r}
+dat_1 <- dat |>
+  count(SID) |>
+  mutate(SEASON = as.numeric(str_sub(SID,1,4))) |>
+  count(SEASON)
+
+dat_1
+```
+
+Analysis on the frequency of Hurricanes in the North Atlantic region is performed here. The aim is to observe how frequency changes over the years. 
+
+
+```{r}
+# Plotting the trend
+ggplot(dat_1, aes(x = SEASON, y = n)) +
+  geom_line(group = 1) +
+  geom_point() +
+  labs(title = "Tropical Cyclone Frequency Over Time", 
+       x = "Year Group", y = "Cyclone Count") +
+  theme_minimal()
+```
+
+```{r}
+#| message: false
+
+# Group by 5-year intervals
+dat_5 <- dat |>
+  count(SID) |>
+  mutate(SEASON = as.numeric(str_sub(SID,1,4))) |>
+  mutate(SEASON_5 = floor(SEASON / 5) * 5) |>
+  count(SEASON_5)
+
+# Group by 10-year intervals
+dat_10 <- dat |>
+  count(SID) |>
+  mutate(SEASON = as.numeric(str_sub(SID,1,4))) |>
+  mutate(SEASON_10 = floor(SEASON / 10) * 10) |>
+  count(SEASON_10)
+
+# Plot the original yearly data
+p1 <- ggplot(dat_1, aes(x = SEASON, y = n)) +
+  geom_line(group = 1) +
+  geom_point() +
+  labs(title = "Tropical Cyclone Frequency (Yearly)", 
+       x = "Year", y = "Cyclone Count") +
+  theme_minimal()
+
+# Plot the 5-year interval data
+p2 <- ggplot(dat_5, aes(x = SEASON_5, y = n)) +
+  geom_line(group = 1) +
+  geom_point() +
+  labs(title = "Tropical Cyclone Frequency (5-Year Group)", 
+       x = "Year Group", y = "Cyclone Count") +
+  theme_minimal()
+
+# Plot the 10-year interval data
+p3 <- ggplot(dat_10, aes(x = SEASON_10, y = n)) +
+  geom_line(group = 1) +
+  geom_point() +
+  labs(title = "Tropical Cyclone Frequency (10-Year Group)", 
+       x = "Year Group", y = "Cyclone Count") +
+  theme_minimal()
+
+# Display plots
+p1
+p2
+p3
+
+```
+Further analysis observed the frequency per Hurricane category. This includes Tropical Storms, Category 1, Category 2, Category 3, Category 4 and finally Category 5.
+
+```{r}
+#| message: false
+#| warning: false
+
+# Classify each cyclone based on max wind speed
+dat_2 <- dat |>
+  group_by(SID) |>
+  summarize(max_wind = max(WMO_WIND, na.rm = TRUE)) |>
+  mutate(
+    SEASON = as.numeric(str_sub(SID, 1, 4)),
+    Category = case_when(
+      max_wind < 64 ~ "Tropical Storm",
+      max_wind >= 64 & max_wind <= 82 ~ "Category 1",
+      max_wind >= 83 & max_wind <= 95 ~ "Category 2",
+      max_wind >= 96 & max_wind <= 112 ~ "Category 3",
+      max_wind >= 113 & max_wind <= 136 ~ "Category 4",
+      max_wind >= 137 ~ "Category 5",
+      TRUE ~ NA_character_  # Handle missing values
+    )
+  ) |> 
+  filter(!is.na(Category))  # Remove missing values
+
+# Group by year
+dat_yearly <- dat_2 |> count(SEASON, Category)
+
+# Group by 5-year interval
+dat_2_5 <- dat_2 |>
+  mutate(SEASON_5 = floor(SEASON / 5) * 5) |>
+  count(SEASON_5, Category)
+
+# Group by 10-year interval
+dat_2_10 <- dat_2 |>
+  mutate(SEASON_10 = floor(SEASON / 10) * 10) |>
+  count(SEASON_10, Category)
+
+# Plot yearly trends
+p1 <- ggplot(dat_yearly, aes(x = SEASON, y = n, color = Category, group = Category)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Cyclone Category Trends (Yearly)", 
+       x = "Year", y = "Cyclone Count") +
+  theme_minimal()
+
+# Plot 5-year trends
+p2 <- ggplot(dat_2_5, aes(x = SEASON_5, y = n, color = Category, group = Category)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Cyclone Category Trends (5-Year Grouping)", 
+       x = "Year Group", y = "Cyclone Count") +
+  theme_minimal()
+
+# Plot 10-year trends
+p3 <- ggplot(dat_2_10, aes(x = SEASON_10, y = n, color = Category, group = Category)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Cyclone Category Trends (10-Year Grouping)", 
+       x = "Year Group", y = "Cyclone Count") +
+  theme_minimal()
+
+p1
+p2
+p3
+
+```
+
+```{r}
+#| message: false
+
+# Count storms by year and category
+storm_counts <- dat_2 %>%
+  group_by(SEASON, Category) %>%
+  summarise(count = n(), .groups = "drop")
+
+# Define custom colors for categories
+category_colors <- c(
+  "Tropical Storm" = "grey",
+  "Category 1" = "pink",
+  "Category 2" = "lightcoral",
+  "Category 3" = "red",
+  "Category 4" = "darkred",
+  "Category 5" = "maroon"
+)
+
+# Stacked bar plot: Cyclones by category per year
+p1 <- ggplot(storm_counts, aes(x = SEASON, y = count, fill = Category)) +
+  geom_bar(stat = "identity", position = "stack") +
+  scale_fill_manual(values = category_colors) +
+  labs(
+    title = "Storms by Type and Year",
+    x = "Year",
+    y = "Number of Storms",
+    fill = "Category"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+p1
+
+# Faceted version by category with smoothed trend lines
+p2 <- ggplot(storm_counts, aes(x = SEASON, y = count, fill = Category)) +
+  geom_bar(stat = "identity") +
+  geom_smooth(method = "lm", color = "black", linetype = "dashed") +  # Smoother trend lines
+  facet_wrap(~ Category, scales = "free_y") +
+  scale_fill_manual(values = category_colors) +
+  labs(
+    title = "Storms by Hurricane Category",
+    x = "Year",
+    y = "Number of Storms",
+    fill = "Category"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.text = element_text(size = 10, face = "bold")
+  )
+
+p2
+
+```
+## CATEGORY 5 STORMS
+Moreover some closer analysis was performed for Category 5 Hurricanes to observe if they appear more frequently in recent years and if the maximum speed reached is higher in comparison to the past.
+
+```{r}
+#| message: false
+
+# Get the full range of years in the dataset
+all_years <- tibble(SEASON = seq(min(dat_2$SEASON, na.rm = TRUE), max(dat_2$SEASON, na.rm = TRUE), by = 1))
+
+# Filter for Category 5 cyclones and count per year
+cat5_storms <- dat_2 |>
+  filter(Category == "Category 5") |>
+  count(SEASON)
+
+# Merge with all years and replace NAs with 0
+cat5_storms_full <- all_years |>
+  left_join(cat5_storms, by = "SEASON") |>
+  mutate(n = ifelse(is.na(n), 0, n))  # Replace NA with 0
+
+# Plot Category 5 cyclones over time with a trend line
+p_cat5 <- ggplot(cat5_storms_full, aes(x = SEASON, y = n)) +
+  geom_point(color = "maroon", size = 3) +  # Category 5 points
+  geom_line(color = "maroon") +  # Connecting line
+  geom_smooth(method = "lm", color = "black", linetype = "dashed") +  # Trend line
+  labs(
+    title = "Category 5 Cyclones Over Time (Including Zero Years)",
+    x = "Year",
+    y = "Number of Category 5 Cyclones"
+  ) +
+  theme_minimal()
+
+# Display plot
+p_cat5
+
+```
+
+
+
