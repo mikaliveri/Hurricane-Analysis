@@ -38,7 +38,7 @@ library(viridis)
 # ------------------------------------------------------------------------------
 
 # Load and prepare data
-ibtracs <- "/Users/mikaellaliveri/Library/CloudStorage/OneDrive-ImperialCollegeLondon/Year 4/Spring/STAT199/ibtracs-data/csv-raw-files/ibtracs.NA.list.v04r01.csv"
+ibtracs <- "../../ibtracs.NA.csv"
 
 col_names <- c(
   "SID", "SEASON", "NUMBER", "BASIN", "SUBBASIN", "NAME", "ISO_TIME",
@@ -55,7 +55,7 @@ dat <- read.csv(
   file = ibtracs,
   colClasses = c(col_types, rep("NULL", 158)),
   stringsAsFactors = FALSE, 
-  skip = 77876, 
+  # skip = 77876, 
   na.strings = " "
 )
 
