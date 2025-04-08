@@ -54,7 +54,8 @@ col_types <- c(
 dat <- read.csv(
   file = ibtracs,
   colClasses = c(col_types, rep("NULL", 158)),
-  stringsAsFactors = FALSE, 
+  stringsAsFactors = FALSE,
+  nrows = 48031,
   # skip = 77876, 
   na.strings = " "
 )
