@@ -1,5 +1,7 @@
 This folder...
 
+![](Map-Analysis-App-Normal.png)
+
 To run the app in RStudio, execute the following code in R:
 
 ```r
