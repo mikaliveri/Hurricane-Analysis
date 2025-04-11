@@ -1,5 +1,7 @@
 Author: Mikaella Liveri
+
 Year: Spring 2025
+
 This folder includes a Shiny app that visualizes historical hurricane tracks. Users can filter hurricanes based on category, wind speed, year range, and month. The app provides an interactive map where storms are color-coded by wind speed, with a customizable color palette and the option to reverse colors.
 
 Details:
