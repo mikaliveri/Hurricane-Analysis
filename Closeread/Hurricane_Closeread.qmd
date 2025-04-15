@@ -1,0 +1,524 @@
+---
+title: "Hurricane Close Read"
+format:
+  closeread-html:
+    cr-style:
+      section-background-color: "#ffffff"
+      narrative-background-color-sidebar: "#222222"
+      narrative-text-color-sidebar: "#ffffff"
+      narrative-font-size: 2em
+---
+
+```{r setup, message=FALSE}
+# ------------------------------------------------------------------------------
+# Title: Hurricane Closeread
+# ------------------------------------------------------------------------------
+# Description:
+# This document is a closeread document visualizing the formation of hurricanes.
+# ------------------------------------------------------------------------------
+# Details:
+# - Uses the ibtracs dataset to visualize hurricane paths.
+# ------------------------------------------------------------------------------
+# Inputs:
+# - ibtracs dataset (CSV file): Contains hurricane details including ID, 
+#   year, wind speed, latitude, and longitude.
+# - User-selected filters:
+#   - Hurricane ID
+# ------------------------------------------------------------------------------
+# Output:
+# - Closead of specific hurricane path
+# ------------------------------------------------------------------------------
+
+library(tidyverse)
+library(lubridate)
+library(sf)
+library(rnaturalearth)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(leaflet)
+library(rnaturalearthdata)
+```
+
+```{r}
+# import CSV file with read.csv()
+
+# read-in only first 16 columns
+ibtracs <- "../ibtracs.NA.csv"
+
+
+# names of first 16 columns
+col_names <- c(
+  "SID",
+  "SEASON",
+  "NUMBER",
+  "BASIN",
+  "SUBBASIN",
+  "NAME",
+  "ISO_TIME",
+  "NATURE",
+  "LAT",
+  "LON",
+  "WMO_WIND",
+  "WMO_PRES",
+  "WMO_AGENCY",
+  "TRACK_TYPE",
+  "DIST2LAND",
+  "LANDFALL"
+)
+
+# data-type of first 16 columns
+col_types <- c(
+  "character",
+  "integer",
+  "integer",
+  "character",
+  "character",
+  "character",
+  "character",
+  "character",
+  "double",
+  "double",
+  "integer",
+  "integer",
+  "character",
+  "character",
+  "integer",
+  "integer"  
+)
+
+
+dat <- read.csv(
+  file = ibtracs,
+  colClasses = c(col_types, rep("NULL", 158)),
+  stringsAsFactors = FALSE, 
+  # skip = 77876, # starting SEASON 1970
+  na.strings = " ")
+
+colnames(dat) <- col_names
+
+# Extract date and time components
+dat$DATE <- as.Date(dat$ISO_TIME)  # Date only
+dat$DATETIME <- as.POSIXct(dat$ISO_TIME, format = "%Y-%m-%d %H:%M:%S")  # Full date-time
+dat$TIME <- format(as.POSIXct(dat$ISO_TIME, format = "%Y-%m-%d %H:%M:%S"), "%H:%M:%S")  # Time only
+dat$DATETIME <- ymd_hms(dat$ISO_TIME)
+```
+
+```{r}
+# Define North Atlantic region limits
+min_lon <- -100  # Western boundary
+max_lon <- 0   # Eastern boundary
+min_lat <- 0     # Southern boundary
+max_lat <- 60    # Northern boundary
+```
+
+```{r}
+# Set the hurricane ID (could also be user input)
+#hurricane_id <- "2018280N18273"
+#hurricane_id <- "2005217N13327"
+hurricane_id <- "2005236N23285"  
+
+# Filter for the selected hurricane
+hurricane_track <- dat |> filter(SID == hurricane_id)
+
+# Start point
+hurricane_start <- hurricane_track |> slice(1) |> select(LON, LAT)
+
+# Classify all points into categories
+hurricane_track <- hurricane_track |> 
+    mutate(category = case_when(
+        WMO_WIND < 34 ~ "Tropical Depression",  
+        WMO_WIND >= 34 & WMO_WIND < 64 ~ "Tropical Storm",
+        WMO_WIND >= 64 & WMO_WIND < 83 ~ "Category 1",
+        WMO_WIND >= 83 & WMO_WIND < 96 ~ "Category 2",
+        WMO_WIND >= 96 & WMO_WIND < 113 ~ "Category 3",
+        WMO_WIND >= 113 & WMO_WIND < 137 ~ "Category 4",
+        WMO_WIND >= 137 ~ "Category 5"
+    ))
+
+
+# Helper to get first time for a category
+find_first_datetime <- function(track, cat) {
+    filtered <- track |> filter(category == cat)
+    if (nrow(filtered) > 0) {
+        return(filtered |> slice(1) |> pull(DATETIME))
+    } else {
+        return(NA)
+    }
+}
+
+# Find times when the hurricane transitions into each category
+date_ts <- find_first_datetime(hurricane_track, "Tropical Storm")
+date_cat1 <- find_first_datetime(hurricane_track, "Category 1")
+date_cat2 <- find_first_datetime(hurricane_track, "Category 2")
+date_cat3 <- find_first_datetime(hurricane_track, "Category 3")
+date_cat4 <- find_first_datetime(hurricane_track, "Category 4")
+date_cat5 <- find_first_datetime(hurricane_track, "Category 5")
+
+# Handle Category 5 drop-off (if it ever reaches Cat 5)
+if (!is.na(date_cat5)) {
+    first_drop_from_cat5 <- hurricane_track |> 
+        filter(DATETIME > date_cat5 & WMO_WIND < 137) |> 
+        slice(1)
+    date_end_cat5 <- if (nrow(first_drop_from_cat5) > 0) first_drop_from_cat5$DATETIME else tail(hurricane_track$DATETIME, 1)
+} else {
+    date_end_cat5 <- NA
+    after_cat5_landfall <- NA  # Ensuring it is defined to prevent errors
+}
+
+
+# Handle landfall after Cat 5 (if any)
+# Ensure after_cat5_landfall always exists (even if empty)
+after_cat5_landfall <- tibble(LON = numeric(), LAT = numeric(), DATETIME = as.POSIXct(character()))
+
+if (!is.na(date_end_cat5)) {
+    after_cat5_landfall <- hurricane_track |> 
+        filter(DATETIME > date_end_cat5 & DIST2LAND == 0) |> 
+        slice(1)
+    date_landfall_after_cat5 <- if (nrow(after_cat5_landfall) > 0) after_cat5_landfall$DATETIME else NA
+} else {
+    date_landfall_after_cat5 <- NA
+}
+
+# Construct track segments — fully overlapping
+hurricane_nothing <- hurricane_track |> filter(DATETIME <= date_ts)
+
+hurricane_tropicalstorm <- hurricane_track |> 
+    filter(DATETIME >= date_ts & DATETIME <= date_cat1)
+
+hurricane_category1 <- hurricane_track |> 
+    filter(DATETIME >= date_cat1 & DATETIME <= date_cat2)
+
+hurricane_category2 <- hurricane_track |> 
+    filter(DATETIME >= date_cat2 & DATETIME <= date_cat3)
+
+hurricane_category3 <- hurricane_track |> 
+    filter(DATETIME >= date_cat3 & DATETIME <= date_cat4)
+
+hurricane_category4 <- hurricane_track |> 
+    filter(DATETIME >= date_cat4 & DATETIME <= date_cat5)
+
+hurricane_during_category5 <- hurricane_track |> 
+    filter(DATETIME >= date_cat5 & DATETIME <= date_end_cat5)
+
+# After Cat 5 until landfall
+hurricane_after_cat5_until_landfall <- if (!is.na(date_landfall_after_cat5)) {
+    hurricane_track |> filter(DATETIME >= date_end_cat5 & DATETIME <= date_landfall_after_cat5)
+} else {
+    hurricane_track |> filter(DATETIME >= date_end_cat5)  # if no landfall, this is the rest
+}
+
+# Final section after landfall (rest of track)
+hurricane_rest_of_track <- if (!is.na(date_landfall_after_cat5)) {
+    hurricane_track |> filter(DATETIME > date_landfall_after_cat5)
+} else {
+    tibble(LON = numeric(), LAT = numeric(), DATETIME = as.POSIXct(character()))
+}
+
+# Load world map
+world_map <- ne_countries(returnclass = "sf")
+
+hurricane_name <- str_to_title(unique(hurricane_track$NAME))
+hurricane_year <- unique(hurricane_track$SEASON)
+plot_title <- paste("Hurricane", hurricane_name, "(", hurricane_year, ")", sep = " ")
+
+# Helper function to get the first date when a hurricane reaches a given category
+find_first_date <- function(track, cat) {
+    filtered <- track |> filter(category == cat)
+    if (nrow(filtered) > 0) {
+        return(format(filtered |> slice(1) |> pull(DATE), "%d/%m/%Y"))  # Format date as DD/MM/YYYY
+    } else {
+        return(NA)
+    }
+}
+
+# Extract first appearance dates for each category
+date_td <- find_first_date(hurricane_track, "Tropical Depression")  # New
+date_ts <- find_first_date(hurricane_track, "Tropical Storm")
+date_cat1 <- find_first_date(hurricane_track, "Category 1")
+date_cat2 <- find_first_date(hurricane_track, "Category 2")
+date_cat3 <- find_first_date(hurricane_track, "Category 3")
+date_cat4 <- find_first_date(hurricane_track, "Category 4")
+date_cat5 <- find_first_date(hurricane_track, "Category 5")
+
+# Extract landfall date from after_cat5_landfall (if it exists)
+date_landfall <- if (nrow(after_cat5_landfall) > 0) format(after_cat5_landfall$DATETIME[1], "%d/%m/%Y") else NA
+
+# Extract wind speed at landfall
+wind_at_landfall <- if (nrow(after_cat5_landfall) > 0) after_cat5_landfall$WMO_WIND[1] else NA
+
+# Determine the hurricane category at landfall
+category_at_landfall <- case_when(
+    is.na(wind_at_landfall) ~ NA_character_,  # No landfall
+    wind_at_landfall < 34 ~ "Tropical Depression",
+    wind_at_landfall >= 34 & wind_at_landfall < 64 ~ "Tropical Storm",
+    wind_at_landfall >= 64 & wind_at_landfall < 83 ~ "Category 1",
+    wind_at_landfall >= 83 & wind_at_landfall < 96 ~ "Category 2",
+    wind_at_landfall >= 96 & wind_at_landfall < 113 ~ "Category 3",
+    wind_at_landfall >= 113 & wind_at_landfall < 137 ~ "Category 4",
+    wind_at_landfall >= 137 ~ "Category 5"
+)
+
+
+```
+
+This is the story of `r hurricane_name`.
+
+:::: {.cr-section}
+
+@cr-sticky1
+
+[@cr-sticky1]{scale-by="1.5"}
+
+Hurricane `r hurricane_name` first made landfall on `r hurricane_track |> slice(1) |> pull(DATE)`. [@cr-sticky1]{scale-by="1.5" pan-to="-30%,20%"}
+
+@cr-sticky1
+
+::: {#cr-sticky1}
+![](https://cdn.britannica.com/74/121674-050-C458B2B5/satellite-image-National-Oceanic-and-Atmospheric-Administration-August-28-2005.jpg)
+:::
+
+`r hurricane_name` started as a tropical depression on `r hurricane_track |> slice(1) |> pull(DATE)`. @cr-sticky2
+
+::: {#cr-sticky2}
+```{r out.width="100%"}
+# Plot hurricane's starting point on the map
+ggplot() +
+  geom_sf(data = world_map, fill = "#DCDCDC", color = "black") +  # Base map
+  geom_point(data = hurricane_start, aes(x = LON, y = LAT), 
+             color = "red", size = 3) +  # Starting point
+  labs(x = "Longitude", y = "Latitude") +
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +  # Zoom to North Atlantic
+  theme_minimal() +
+  labs(title = plot_title,
+       x = "Longitude", y = "Latitude")
+```
+:::
+
+@cr-sticky3
+
+::: {#cr-sticky3}
+```{r out.width="100%"}
+ggplot() +
+  geom_sf(data = world_map, fill = "#DCDCDC", color = "black") +
+  geom_point(data = hurricane_start, aes(x = LON, y = LAT), 
+             color = "gray", size = 3) +  # Starting point
+  geom_path(data = hurricane_nothing, aes(x = LON, y = LAT), color = "gray", linewidth = 1.2) +
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +
+  theme_minimal() +
+  labs(title = plot_title,
+       x = "Longitude", y = "Latitude")
+```
+:::
+
+`r if (!is.na(date_ts)) paste("It became a Tropical Storm on", date_ts, ". @cr-sticky4")`
+
+::: {#cr-sticky4}
+```{r out.width="100%"}
+ggplot() +
+  geom_sf(data = world_map, fill = "#DCDCDC", color = "black") +
+  geom_point(data = hurricane_start, aes(x = LON, y = LAT), 
+             color = "gray", size = 3) +  # Starting point
+  geom_path(data = hurricane_nothing, aes(x = LON, y = LAT), color = "gray", linewidth = 1.2) +
+  geom_path(data = hurricane_tropicalstorm, aes(x = LON, y = LAT), color = "#FFC0C0", linewidth = 1.2) +
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +
+  theme_minimal() +
+  labs(title = plot_title,
+       x = "Longitude", y = "Latitude")
+```
+:::
+
+`r if (!is.na(date_cat1)) paste("It then became a Category 1 Hurricane on", date_cat1, ". @cr-sticky5")`
+
+::: {#cr-sticky5}
+```{r out.width="100%"}
+ggplot() +
+  geom_sf(data = world_map, fill = "#DCDCDC", color = "black") +
+  geom_point(data = hurricane_start, aes(x = LON, y = LAT), 
+             color = "gray", size = 3) +  # Starting point
+  geom_path(data = hurricane_nothing, aes(x = LON, y = LAT), color = "gray", linewidth = 1.2) +
+  geom_path(data = hurricane_tropicalstorm, aes(x = LON, y = LAT), color = "#FFC0C0", linewidth = 1.2) +
+  geom_path(data = hurricane_category1, aes(x = LON, y = LAT), color = "#FFA0A0", linewidth = 1.2) +
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +
+  theme_minimal() +
+  labs(title = plot_title,
+       x = "Longitude", y = "Latitude")
+```
+:::
+
+`r if (!is.na(date_cat2)) paste("It then became a Category 2 Hurricane on", date_cat2, ". @cr-sticky6") else ""`
+
+::: {#cr-sticky6}
+```{r out.width="100%"}
+ggplot() +
+  geom_sf(data = world_map, fill = "#DCDCDC", color = "black") +
+  geom_point(data = hurricane_start, aes(x = LON, y = LAT), 
+             color = "gray", size = 3) +  # Starting point
+  geom_path(data = hurricane_nothing, aes(x = LON, y = LAT), color = "gray", linewidth = 1.2) +
+  geom_path(data = hurricane_tropicalstorm, aes(x = LON, y = LAT), color = "#FFC0C0", linewidth = 1.2) +
+  geom_path(data = hurricane_category1, aes(x = LON, y = LAT), color = "#FFA0A0", linewidth = 1.2) +
+  geom_path(data = hurricane_category2, aes(x = LON, y = LAT), color = "#FF8080", linewidth = 1.2) +
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +
+  theme_minimal() +
+  labs(title = plot_title,
+       x = "Longitude", y = "Latitude")
+```
+:::
+
+`r if (!is.na(date_cat3)) paste("It then became a Category 3 Hurricane on", date_cat3, ". @cr-sticky7") else ""`
+
+::: {#cr-sticky7}
+```{r out.width="100%"}
+ggplot() +
+  geom_sf(data = world_map, fill = "#DCDCDC", color = "black") +
+  geom_point(data = hurricane_start, aes(x = LON, y = LAT), 
+             color = "gray", size = 3) +  # Starting point
+  geom_path(data = hurricane_nothing, aes(x = LON, y = LAT), color = "gray", linewidth = 1.2) +
+  geom_path(data = hurricane_tropicalstorm, aes(x = LON, y = LAT), color = "#FFC0C0", linewidth = 1.2) +
+  geom_path(data = hurricane_category1, aes(x = LON, y = LAT), color = "#FFA0A0", linewidth = 1.2) +
+  geom_path(data = hurricane_category2, aes(x = LON, y = LAT), color = "#FF8080", linewidth = 1.2) +
+  geom_path(data = hurricane_category3, aes(x = LON, y = LAT), color = "#FF6060", linewidth = 1.2) +
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +
+  theme_minimal() +
+  labs(title = plot_title,
+       x = "Longitude", y = "Latitude")
+```
+:::
+
+`r if (!is.na(date_cat4)) paste("It then became a Category 4 Hurricane on", date_cat4, ". @cr-sticky8")`
+
+::: {#cr-sticky8}
+```{r out.width="100%"}
+ggplot() +
+  geom_sf(data = world_map, fill = "#DCDCDC", color = "black") +
+  geom_point(data = hurricane_start, aes(x = LON, y = LAT), 
+             color = "gray", size = 3) +  # Starting point
+  geom_path(data = hurricane_nothing, aes(x = LON, y = LAT), color = "gray", linewidth = 1.2) +
+  geom_path(data = hurricane_tropicalstorm, aes(x = LON, y = LAT), color = "#FFC0C0", linewidth = 1.2) +
+  geom_path(data = hurricane_category1, aes(x = LON, y = LAT), color = "#FFA0A0", linewidth = 1.2) +
+  geom_path(data = hurricane_category2, aes(x = LON, y = LAT), color = "#FF8080", linewidth = 1.2) +
+  geom_path(data = hurricane_category3, aes(x = LON, y = LAT), color = "#FF6060", linewidth = 1.2) +
+  geom_path(data = hurricane_category4, aes(x = LON, y = LAT), color = "#FF3030", linewidth = 1.2) +
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +
+  theme_minimal() +
+  labs(title = plot_title,
+       x = "Longitude", y = "Latitude")
+```
+:::
+
+`r if (!is.na(date_cat5)) paste("It then became a Category 5 Hurricane on", date_cat5, ". @cr-sticky9") else ""`
+
+::: {#cr-sticky9}
+```{r out.width="100%"}
+ggplot() +
+  geom_sf(data = world_map, fill = "#DCDCDC", color = "black") +
+  geom_point(data = hurricane_start, aes(x = LON, y = LAT), 
+             color = "gray", size = 3) +  # Starting point
+  geom_path(data = hurricane_nothing, aes(x = LON, y = LAT), color = "gray", linewidth = 1.2) +
+  geom_path(data = hurricane_tropicalstorm, aes(x = LON, y = LAT), color = "#FFC0C0", linewidth = 1.2) +
+  geom_path(data = hurricane_category1, aes(x = LON, y = LAT), color = "#FFA0A0", linewidth = 1.2) +
+  geom_path(data = hurricane_category2, aes(x = LON, y = LAT), color = "#FF8080", linewidth = 1.2) +
+  geom_path(data = hurricane_category3, aes(x = LON, y = LAT), color = "#FF6060", linewidth = 1.2) +
+  geom_path(data = hurricane_category4, aes(x = LON, y = LAT), color = "#FF3030", linewidth = 1.2) +
+  geom_path(data = hurricane_during_category5, aes(x = LON, y = LAT), color = "#B00000", linewidth = 1.2) +
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +
+  theme_minimal() +
+  labs(title = plot_title,
+       x = "Longitude", y = "Latitude")
+```
+:::
+
+`r if (!is.na(date_landfall)) paste("It then made landfall as a", category_at_landfall, "on", date_landfall, ". @cr-stick10")` @cr-sticky10
+
+[@cr-sticky10]{scale-by="3" pan-to="50%,10%"}
+
+@cr-sticky10
+
+::: {#cr-sticky10}
+```{r out.width="100%"}
+# Ensure after_cat5_landfall is an empty tibble if no data
+if (!exists("after_cat5_landfall") || is.null(after_cat5_landfall)) {
+    after_cat5_landfall <- tibble(LON = numeric(), LAT = numeric(), DATETIME = as.POSIXct(character()))
+}
+
+# Create the ggplot object
+p <- ggplot() +
+    geom_sf(data = world_map, fill = "#DCDCDC", color = "black") +
+    geom_point(data = hurricane_start, aes(x = LON, y = LAT), color = "gray", size = 3) +  
+    geom_path(data = hurricane_nothing, aes(x = LON, y = LAT), color = "gray", linewidth = 1.2) +
+    geom_path(data = hurricane_tropicalstorm, aes(x = LON, y = LAT), color = "#FFC0C0", linewidth = 1.2) +
+    geom_path(data = hurricane_category1, aes(x = LON, y = LAT), color = "#FFA0A0", linewidth = 1.2) +
+    geom_path(data = hurricane_category2, aes(x = LON, y = LAT), color = "#FF8080", linewidth = 1.2) +
+    geom_path(data = hurricane_category3, aes(x = LON, y = LAT), color = "#FF6060", linewidth = 1.2) +
+    geom_path(data = hurricane_category4, aes(x = LON, y = LAT), color = "#FF3030", linewidth = 1.2) +
+    geom_path(data = hurricane_during_category5, aes(x = LON, y = LAT), color = "#B00000", linewidth = 1.2) +
+    geom_path(data = hurricane_after_cat5_until_landfall, aes(x = LON, y = LAT), color = "#FF3030", linewidth = 1.2) +
+    coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +
+    theme_minimal() +
+    labs(title = plot_title, x = "Longitude", y = "Latitude")
+
+# Conditionally add geom_point() only if after_cat5_landfall has data
+if (nrow(after_cat5_landfall) > 0) {
+    p <- p + geom_point(data = after_cat5_landfall, aes(LON, LAT), color = "#FF3030", size = 3)
+}
+
+# Print the plot
+print(p)
+
+
+
+
+# ggplot() +
+#   geom_sf(data = world_map, fill = "lightgray", color = "black") +
+#   geom_point(data = hurricane_start, aes(x = LON, y = LAT), 
+#              color = "#D3D3D3", size = 3) +  # Starting point
+#   geom_path(data = hurricane_nothing, aes(x = LON, y = LAT), color = "#D3D3D3", linewidth = 1.2) +
+#   geom_path(data = hurricane_tropicalstorm, aes(x = LON, y = LAT), color = "#FFC0C0", linewidth = 1.2) +
+#   geom_path(data = hurricane_category1, aes(x = LON, y = LAT), color = "#FFA0A0", linewidth = 1.2) +
+#   geom_path(data = hurricane_category2, aes(x = LON, y = LAT), color = "#FF8080", linewidth = 1.2) +
+#   geom_path(data = hurricane_category3, aes(x = LON, y = LAT), color = "#FF6060", linewidth = 1.2) +
+#   geom_path(data = hurricane_category4, aes(x = LON, y = LAT), color = "#FF3030", linewidth = 1.2) +
+#   geom_path(data = hurricane_during_category5, aes(x = LON, y = LAT), color = "#B00000", linewidth = 1.2) +
+#   geom_path(data = hurricane_after_cat5_until_landfall, aes(x = LON, y = LAT), color = "#FF3030", linewidth = 1.2) +
+#   geom_point(data = after_cat5_landfall, aes(LON, LAT), color = "#FF3030", size = 3) +  # Landfall point
+#   coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +
+#   theme_minimal() +
+#   labs(title = plot_title,
+#        x = "Longitude", y = "Latitude")
+
+```
+:::
+
+Until the entire track was formed and it died. @cr-sticky11
+
+::: {#cr-sticky11}
+```{r out.width="100%"}
+hurricane_name <- unique(hurricane_track$NAME)
+hurricane_year <- unique(hurricane_track$SEASON)
+plot_title <- paste("Hurricane", hurricane_name, "(", hurricane_year, ")", sep = " ")
+
+ggplot() +
+  geom_sf(data = world_map, fill = "#DCDCDC", color = "black") +
+  geom_point(data = hurricane_start, aes(x = LON, y = LAT), 
+             color = "gray", size = 3) +  # Starting point
+  geom_path(data = hurricane_nothing, aes(x = LON, y = LAT), color = "gray", linewidth = 1.2) +
+  geom_path(data = hurricane_tropicalstorm, aes(x = LON, y = LAT), color = "#FFC0C0", linewidth = 1.2) +
+  geom_path(data = hurricane_category1, aes(x = LON, y = LAT), color = "#FFA0A0", linewidth = 1.2) +
+  geom_path(data = hurricane_category2, aes(x = LON, y = LAT), color = "#FF8080", linewidth = 1.2) +
+  geom_path(data = hurricane_category3, aes(x = LON, y = LAT), color = "#FF6060", linewidth = 1.2) +
+  geom_path(data = hurricane_category4, aes(x = LON, y = LAT), color = "#FF3030", linewidth = 1.2) +
+  geom_path(data = hurricane_during_category5, aes(x = LON, y = LAT), color = "#B00000", linewidth = 1.2) +
+  geom_path(data = hurricane_after_cat5_until_landfall, aes(x = LON, y = LAT), color = "#FF3030", linewidth = 1.2) +
+  geom_path(data = hurricane_rest_of_track, aes(x = LON, y = LAT), color = "darkgrey", linewidth = 1.2) +
+  geom_point(data = after_cat5_landfall, aes(LON, LAT), color = "#FF3030", size = 3) +  # Landfall point
+  coord_sf(xlim = c(min_lon, max_lon), ylim = c(min_lat, max_lat)) +
+  theme_minimal() +
+  labs(title = plot_title,
+       x = "Longitude", y = "Latitude")
+```
+:::
+
+::::
+
+
+
