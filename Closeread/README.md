@@ -19,7 +19,7 @@ Inputs:
 Output:
 - Closead of specific hurricane path
 
-![](Closeread_hurricane.gif)
+![](Closeread_video.gif)
 
 Note: ensure closeread extension exists to be able to render the closeread file. If this is not the case run this command in the terminal:
 
